@@ -1,0 +1,149 @@
+# ============================================================================
+# Experiment configurations for output-space UDA (Task 1) and
+# MLLM/CLIP knowledge transfer (Task 2).
+#
+# Run:
+#   python scripts/task1_uda.py  --experiment svhn_to_mnist
+#   python scripts/task2_mllm.py --experiment svhn_to_mnist
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Global defaults – overridden per experiment where needed
+# ---------------------------------------------------------------------------
+defaults:
+  task1:
+    model: simplenet          # simplenet | resnet18
+    epochs: 5                 # source-only training epochs
+    adapt_epochs: 3           # pseudo-label fine-tuning epochs
+    batch_size: 64
+    pseudo_threshold: 0.9     # vanilla / crst confidence threshold
+    cbst_p: 0.2               # CBST fraction per class
+  task2:
+    n_shots: 16               # few-shot samples per class
+    adapter_epochs: 10        # CLIP-Adapter training epochs
+    adapter_ratio: 0.25       # bottleneck ratio for CLIPAdapter
+    tip_beta: 5.5             # RBF sharpness for Tip-Adapter
+    batch_size: 64
+
+# ---------------------------------------------------------------------------
+# Experiment definitions
+# ---------------------------------------------------------------------------
+experiments:
+
+  # ── Digit datasets ─────────────────────────────────────────────────────────
+
+  mnist_to_usps:
+    description: "MNIST (source) → USPS (target)"
+    num_classes: 10
+    source:
+      dataset: mnist
+      split: train
+    target:
+      dataset: usps
+      split: train
+    test:
+      dataset: usps
+      split: test
+    task1:
+      model: simplenet
+      epochs: 5
+      adapt_epochs: 3
+      batch_size: 64
+      pseudo_threshold: 0.85
+      cbst_p: 0.25
+    task2:
+      n_shots: 16
+      adapter_epochs: 10
+      tip_beta: 5.0
+      
+  svhn_to_mnist:
+    description: "SVHN (source) → MNIST (target)"
+    num_classes: 10
+    source:
+      dataset: svhn
+      split: train
+    target:
+      dataset: mnist
+      split: train
+    test:
+      dataset: mnist
+      split: test
+    task1:
+      model: simplenet
+      epochs: 5
+      adapt_epochs: 3
+    task2:
+      n_shots: 16
+      adapter_epochs: 10
+
+  office31_amazon_to_webcam:
+    description: "Office-31 Amazon (source) → Webcam (target)"
+    num_classes: 31
+    source:
+      dataset: office31
+      domain: amazon
+    target:
+      dataset: office31
+      domain: webcam
+    test:
+      dataset: office31
+      domain: webcam
+    task1:
+      model: resnet18
+      epochs: 15
+      adapt_epochs: 7
+      batch_size: 32
+      pseudo_threshold: 0.80
+      cbst_p: 0.30
+    task2:
+      n_shots: 8
+      adapter_epochs: 30
+      tip_beta: 6.0
+
+  officehome_art_to_real:
+    description: "OfficeHome Art (source) → Real World (target)"
+    num_classes: 65
+    source:
+      dataset: officehome
+      domain: Art
+    target:
+      dataset: officehome
+      domain: "Real World"
+    test:
+      dataset: officehome
+      domain: "Real World"
+    task1:
+      model: resnet18
+      epochs: 10
+      adapt_epochs: 5
+      batch_size: 32
+      pseudo_threshold: 0.85
+      cbst_p: 0.20
+    task2:
+      n_shots: 16
+      adapter_epochs: 20
+      tip_beta: 7.0
+
+  pacs_photo_to_sketch:
+    description: "PACS Photo (source) → Sketch (target)"
+    num_classes: 7
+    source:
+      dataset: pacs
+      domain: photo
+    target:
+      dataset: pacs
+      domain: sketch
+    test:
+      dataset: pacs
+      domain: sketch
+    task1:
+      model: resnet18
+      epochs: 10
+      adapt_epochs: 8
+      batch_size: 32
+      pseudo_threshold: 0.70
+      cbst_p: 0.35
+    task2:
+      n_shots: 16
+      adapter_epochs: 25
+      tip_beta: 4.0

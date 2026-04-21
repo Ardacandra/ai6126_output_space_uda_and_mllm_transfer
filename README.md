@@ -99,3 +99,40 @@ After downloading or placing all datasets, verify they are loaded correctly:
 ```bash
 python scripts/visualize_dataset.py
 ```
+
+---
+
+## Running Experiments
+
+Experiments are configured in [`configs/experiments.yaml`](configs/experiments.yaml). Each entry defines a source/target dataset pair and per-task hyperparameters.
+
+### Task 1 – Output-Space UDA (Pseudo-Labels)
+
+Trains a source-only model, then adapts it to the target domain using three pseudo-labelling strategies: **Vanilla**, **CBST**, and **CRST**.
+
+```bash
+python scripts/task1_uda.py --experiment <experiment_name>
+```
+
+### Task 2 – MLLM Transfer (CLIP)
+
+Transfers a frozen CLIP ViT-B/32 backbone to the target domain using **CLIP-Adapter** (few-shot fine-tuning) and **Tip-Adapter** (non-parametric cache).
+
+```bash
+# Install CLIP first (one-time)
+pip install git+https://github.com/openai/CLIP.git
+
+python scripts/task2_mllm.py --experiment <experiment_name>
+```
+
+### Available Experiments
+
+| Key | Description |
+|-----|-------------|
+| `mnist_to_usps` | MNIST → USPS |
+| `svhn_to_mnist` | SVHN → MNIST |
+| `office31_amazon_to_webcam` | Office-31 Amazon → Webcam |
+| `officehome_art_to_real` | OfficeHome Art → Real World |
+| `pacs_photo_to_sketch` | PACS Photo → Sketch |
+
+Outputs (metrics table + prediction visualisations) are saved to `out/<experiment_name>/`.
