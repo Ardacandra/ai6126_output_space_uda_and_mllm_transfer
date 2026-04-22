@@ -37,7 +37,7 @@ except ImportError:
         "  pip install git+https://github.com/openai/CLIP.git"
     )
 
-from dataset_factory import CLIP_MEAN, CLIP_STD, get_transform_clip, load_split
+from dataset_factory import CLIP_MEAN, CLIP_STD, get_class_names, get_transform_clip, load_split
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "experiments.yaml"
@@ -151,19 +151,145 @@ def get_metrics(preds, labels) -> dict:
     }
 
 
-def visualize_results(images: torch.Tensor, preds: list, title: str, save_path=None):
+def select_informative_indices(
+    preds_by_method: dict,
+    labels: np.ndarray,
+    method_scores: dict,
+    n_samples: int = 8,
+    better_quota: int = 5,
+) -> np.ndarray:
+    methods = list(preds_by_method.keys())
+    if not methods:
+        return np.array([], dtype=int)
+
+    pred_mat = np.stack([np.array(preds_by_method[m]) for m in methods], axis=0)  # (M, N)
+    correct = pred_mat == labels[None, :]
+
+    # Rank methods by quantitative performance (accuracy), deterministic on method name.
+    ranked_methods = sorted(
+        methods,
+        key=lambda m: (method_scores.get(m, float("-inf")), m),
+        reverse=True,
+    )
+    better_method = ranked_methods[0]
+    worse_method = ranked_methods[-1]
+    method_to_idx = {m: i for i, m in enumerate(methods)}
+    better_idx = method_to_idx[better_method]
+    worse_idx = method_to_idx[worse_method]
+
+    better_only_mask = correct[better_idx] & (~correct[worse_idx])
+    worse_only_mask = correct[worse_idx] & (~correct[better_idx])
+
+    # For Task 2 we have two methods, so disagreement-only masks are enough.
+    better_candidates = np.where(better_only_mask)[0].tolist()
+    worse_candidates = np.where(worse_only_mask)[0].tolist()
+
+    worse_quota = max(0, n_samples - better_quota)
+    take_better = min(better_quota, len(better_candidates))
+    take_worse = min(worse_quota, len(worse_candidates))
+
+    selected = better_candidates[:take_better] + worse_candidates[:take_worse]
+
+    # Reallocate unfilled quota from whichever bucket has leftovers.
+    remaining = n_samples - len(selected)
+    if remaining > 0:
+        extra_better = better_candidates[take_better:]
+        extra_worse = worse_candidates[take_worse:]
+        pool = extra_better + extra_worse
+        selected.extend(pool[:remaining])
+
+    # Final fallback to ensure we always return n_samples indices.
+    if len(selected) < n_samples:
+        for idx in range(pred_mat.shape[1]):
+            if idx not in selected:
+                selected.append(idx)
+            if len(selected) >= n_samples:
+                break
+
+    return np.array(selected[:n_samples], dtype=int)
+
+
+def get_images_by_indices(dataset, indices: np.ndarray) -> torch.Tensor:
+    images = [dataset[int(i)][0] for i in indices]
+    return torch.stack(images)
+
+
+def visualize_method_comparison(
+    images: torch.Tensor,
+    labels: np.ndarray,
+    preds_by_method: dict,
+    title: str,
+    class_names: list,
+    save_path=None,
+):
     n = min(8, len(images))
-    fig, axes = plt.subplots(1, n, figsize=(12, 3))
+    fig = plt.figure(figsize=(3.2 * n, 7.0))
+    gs = fig.add_gridspec(2, n, height_ratios=[3.8, 2.3])
+    axes = [fig.add_subplot(gs[0, i]) for i in range(n)]
+    table_ax = fig.add_subplot(gs[1, :])
+    table_ax.axis("off")
+
+    methods = list(preds_by_method.keys())
+    short_name = {
+        "CLIP-Adapter": "CLIP-Adapter",
+        "Tip-Adapter": "Tip-Adapter",
+    }
+
+    col_labels = ["Method"] + [f"S{i + 1}" for i in range(n)]
+    table_text = []
+    gt_row = ["GT"]
+    for i in range(n):
+        gt_idx = int(labels[i])
+        gt_row.append(class_names[gt_idx] if 0 <= gt_idx < len(class_names) else str(gt_idx))
+    table_text.append(gt_row)
+
+    for method in methods:
+        row = [short_name.get(method, method)]
+        preds = preds_by_method[method]
+        for i in range(n):
+            pred_idx = int(preds[i])
+            pred_name = class_names[pred_idx] if 0 <= pred_idx < len(class_names) else str(pred_idx)
+            row.append(pred_name)
+        table_text.append(row)
+
     clip_mean = np.array(CLIP_MEAN)
     clip_std  = np.array(CLIP_STD)
     for i, ax in enumerate(axes):
         img = images[i].permute(1, 2, 0).cpu().numpy()
         img = img * clip_std + clip_mean          # de-normalise
         ax.imshow(np.clip(img, 0, 1))
-        ax.set_title(f"Pred: {preds[i]}")
+        ax.set_title(f"S{i + 1}", fontsize=14, pad=8)
         ax.axis("off")
-    fig.suptitle(title)
-    plt.tight_layout()
+
+    table = table_ax.table(
+        cellText=table_text,
+        colLabels=col_labels,
+        cellLoc="center",
+        colLoc="center",
+        loc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(13)
+    table.scale(1.0, 1.65)
+
+    for r in range(1, len(table_text) + 1):
+        method_name = "GT" if r == 1 else methods[r - 2]
+        for c in range(1, n + 1):
+            cell = table[(r, c)]
+            if method_name == "GT":
+                cell.set_facecolor("#f0f0f0")
+                continue
+            pred_idx = int(preds_by_method[method_name][c - 1])
+            gt_idx = int(labels[c - 1])
+            cell.set_facecolor("#d9f2d9" if pred_idx == gt_idx else "#f7d6d6")
+
+    for c in range(0, n + 1):
+        table[(0, c)].set_facecolor("#e6e6e6")
+    for r in range(1, len(table_text) + 1):
+        table[(r, 0)].set_facecolor("#efefef")
+
+    fig.suptitle(title, y=0.97)
+    fig.tight_layout(rect=[0, 0.02, 1, 0.94])
     if save_path:
         plt.savefig(save_path, dpi=100)
         print(f"  Saved → {save_path}")
@@ -212,6 +338,7 @@ def main(args):
     print("Loading datasets …")
     train_ds = load_split(exp["target"], transform)   # few-shot pool from *target*
     test_ds  = load_split(exp["test"],   transform)
+    class_names = get_class_names(test_ds)
 
     # Subsample to N-shot
     few_shot_idx = get_few_shot_indices(train_ds, n_shots=t2["n_shots"])
@@ -262,7 +389,6 @@ def main(args):
     # ------------------------------------------------------------------
     adapter.eval(); classifier.eval()
     c_preds, t_preds, all_labels = [], [], []
-    sample_imgs = None
 
     print("Evaluating …")
     with torch.no_grad():
@@ -274,24 +400,31 @@ def main(args):
             t_preds.extend(tip_inference(feat, keys, values, beta=t2["tip_beta"]).argmax(dim=1).cpu().numpy())
             all_labels.extend(lbls.numpy())
 
-            if sample_imgs is None:
-                sample_imgs = imgs.cpu()
-
-    visualize_results(
-        sample_imgs, c_preds[:8],
-        f"CLIP-Adapter – {args.experiment}",
-        save_path=out_dir / "task2_clip_adapter.png",
-    )
-    visualize_results(
-        sample_imgs, t_preds[:8],
-        f"Tip-Adapter – {args.experiment}",
-        save_path=out_dir / "task2_tip_adapter.png",
-    )
-
+    c_preds = np.array(c_preds)
+    t_preds = np.array(t_preds)
+    all_labels = np.array(all_labels)
+    method_preds = {
+        "CLIP-Adapter": c_preds,
+        "Tip-Adapter": t_preds,
+    }
     results = {
         "CLIP-Adapter": get_metrics(c_preds, all_labels),
         "Tip-Adapter":  get_metrics(t_preds, all_labels),
     }
+    acc_scores = {name: metrics["Acc."] for name, metrics in results.items()}
+    sample_idx = select_informative_indices(method_preds, all_labels, acc_scores, n_samples=8, better_quota=5)
+    sample_images = get_images_by_indices(test_ds, sample_idx)
+    sample_labels = all_labels[sample_idx]
+    sample_preds = {k: v[sample_idx] for k, v in method_preds.items()}
+    visualize_method_comparison(
+        sample_images,
+        sample_labels,
+        sample_preds,
+        "Task 2 Method Comparison",
+        class_names,
+        save_path=out_dir / "task2_method_comparison.png",
+    )
+
     print_results_table(results, f"Task 2 Results – {args.experiment}")
 
 

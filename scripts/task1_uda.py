@@ -35,6 +35,7 @@ from sklearn.metrics import (
 from torch.utils.data import DataLoader
 
 from dataset_factory import (
+    get_class_names,
     get_transform_clip,
     get_transform_resnet,
     get_transform_simplenet,
@@ -128,7 +129,7 @@ def train_source_only(model, loader, device, epochs: int, lr: float = 1e-3):
     print("  Source-only training complete.")
 
 
-def evaluate_metrics(model, loader, device) -> dict:
+def collect_predictions(model, loader, device):
     model.eval()
     all_preds, all_labels = [], []
     with torch.no_grad():
@@ -136,12 +137,16 @@ def evaluate_metrics(model, loader, device) -> dict:
             preds = model(data.to(device)).argmax(dim=1).cpu().numpy()
             all_preds.extend(preds)
             all_labels.extend(target.numpy())
+    return np.array(all_preds), np.array(all_labels)
+
+
+def get_metrics(preds, labels) -> dict:
     return {
-        "Acc.":      accuracy_score(all_labels, all_preds),
-        "Prec.":     precision_score(all_labels, all_preds, average="macro", zero_division=0),
-        "Rec.":      recall_score(all_labels, all_preds, average="macro", zero_division=0),
-        "F1":        f1_score(all_labels, all_preds, average="macro", zero_division=0),
-        "Bal. Acc.": balanced_accuracy_score(all_labels, all_preds),
+        "Acc.":      accuracy_score(labels, preds),
+        "Prec.":     precision_score(labels, preds, average="macro", zero_division=0),
+        "Rec.":      recall_score(labels, preds, average="macro", zero_division=0),
+        "F1":        f1_score(labels, preds, average="macro", zero_division=0),
+        "Bal. Acc.": balanced_accuracy_score(labels, preds),
     }
 
 
@@ -219,23 +224,184 @@ def adapt_with_pseudo_labels(
 # Visualisation
 # ---------------------------------------------------------------------------
 
-def visualize_results(model, loader, device, title: str, save_path=None):
-    model.eval()
-    images, _ = next(iter(loader))
+def select_informative_indices(
+    preds_by_method: dict,
+    labels: np.ndarray,
+    method_scores: dict,
+    top_method: str,
+    n_samples: int = 8,
+) -> np.ndarray:
+    methods = list(preds_by_method.keys())
+    if not methods:
+        return np.array([], dtype=int)
+
+    pred_mat = np.stack([np.array(preds_by_method[m]) for m in methods], axis=0)  # (M, N)
+    correct = pred_mat == labels[None, :]
+
+    method_to_idx = {m: i for i, m in enumerate(methods)}
+    if top_method not in method_to_idx:
+        top_method = max(methods, key=lambda m: method_scores.get(m, float("-inf")))
+    top_idx = method_to_idx[top_method]
+    other_idx = [i for i, m in enumerate(methods) if m != top_method]
+
+    unique_preds = np.array([len(np.unique(pred_mat[:, i])) for i in range(pred_mat.shape[1])])
+    num_correct = correct.sum(axis=0)
+    wrong_others = (~correct[other_idx]).sum(axis=0) if other_idx else np.zeros(pred_mat.shape[1], dtype=int)
+
+    top_correct = correct[top_idx]
+    others_any_wrong = np.any(~correct[other_idx], axis=0) if other_idx else np.zeros(pred_mat.shape[1], dtype=bool)
+    exclusive_top_mask = top_correct & (np.all(~correct[other_idx], axis=0) if other_idx else np.zeros(pred_mat.shape[1], dtype=bool))
+    primary_mask = top_correct & others_any_wrong
+
+    def rank(mask: np.ndarray) -> np.ndarray:
+        cand = np.where(mask)[0]
+        if len(cand) == 0:
+            return cand
+        # Prioritise strongest evidence: more non-best models wrong, then stronger disagreement.
+        score = np.stack([wrong_others[cand], unique_preds[cand], (len(methods) - num_correct[cand])], axis=1)
+        order = np.lexsort((-score[:, 2], -score[:, 1], -score[:, 0]))[::-1]
+        return cand[order]
+
+    selected = []
+
+    # Force at least one sample where only the top method is correct (if available).
+    for idx in rank(exclusive_top_mask):
+        selected.append(int(idx))
+        break
+
+    for idx in rank(primary_mask):
+        if idx not in selected:
+            selected.append(int(idx))
+        if len(selected) >= n_samples:
+            break
+
+    if len(selected) < n_samples and other_idx:
+        secondary_mask = top_correct & (~np.all(correct[other_idx], axis=0))
+        for idx in rank(secondary_mask):
+            if idx not in selected:
+                selected.append(int(idx))
+            if len(selected) >= n_samples:
+                break
+
+    if len(selected) < n_samples:
+        fallback_mask = (num_correct > 0) & (num_correct < len(methods))
+        for idx in rank(fallback_mask):
+            if idx not in selected:
+                selected.append(int(idx))
+            if len(selected) >= n_samples:
+                break
+
+    if len(selected) < n_samples:
+        for idx in range(pred_mat.shape[1]):
+            if idx not in selected:
+                selected.append(idx)
+            if len(selected) >= n_samples:
+                break
+
+    return np.array(selected[:n_samples], dtype=int)
+
+
+def get_top_method_name(results: dict) -> str:
+    """Pick a single top method with deterministic tie-breakers."""
+    return max(
+        results.keys(),
+        key=lambda m: (
+            results[m]["Acc."],
+            results[m]["Bal. Acc."],
+            results[m]["F1"],
+            results[m]["Prec."],
+            results[m]["Rec."],
+            m,
+        ),
+    )
+
+
+def get_images_by_indices(dataset, indices: np.ndarray) -> torch.Tensor:
+    images = [dataset[int(i)][0] for i in indices]
+    return torch.stack(images)
+
+
+def visualize_method_comparison(
+    images: torch.Tensor,
+    labels: np.ndarray,
+    preds_by_method: dict,
+    class_names: list,
+    title: str,
+    save_path=None,
+):
     n = min(8, len(images))
-    with torch.no_grad():
-        preds = model(images[:n].to(device)).argmax(dim=1).cpu().numpy()
-    fig, axes = plt.subplots(1, n, figsize=(12, 3))
+    fig = plt.figure(figsize=(3.2 * n, 7.2))
+    gs = fig.add_gridspec(2, n, height_ratios=[3.8, 2.4])
+    axes = [fig.add_subplot(gs[0, i]) for i in range(n)]
+    table_ax = fig.add_subplot(gs[1, :])
+    table_ax.axis("off")
+
+    methods = list(preds_by_method.keys())
+    short_name = {
+        "Source Only": "Source",
+        "Vanilla": "Vanilla",
+        "CBST": "CBST",
+        "CRST": "CRST",
+    }
+
+    # Row 1 is GT labels, following rows are method predictions.
+    col_labels = ["Method"] + [f"S{i + 1}" for i in range(n)]
+    table_text = []
+    gt_row = ["GT"]
+    for i in range(n):
+        gt_idx = int(labels[i])
+        gt_row.append(class_names[gt_idx] if 0 <= gt_idx < len(class_names) else str(gt_idx))
+    table_text.append(gt_row)
+
+    for method in methods:
+        row = [short_name.get(method, method)]
+        preds = preds_by_method[method]
+        for i in range(n):
+            pred_idx = int(preds[i])
+            pred_name = class_names[pred_idx] if 0 <= pred_idx < len(class_names) else str(pred_idx)
+            row.append(pred_name)
+        table_text.append(row)
+
     for i, ax in enumerate(axes):
         img = images[i]
         if img.shape[0] == 1:
             ax.imshow(img.squeeze(), cmap="gray")
         else:
             ax.imshow(img.permute(1, 2, 0).numpy().clip(0, 1))
-        ax.set_title(f"Pred: {preds[i]}")
+        ax.set_title(f"S{i + 1}", fontsize=14, pad=8)
         ax.axis("off")
-    fig.suptitle(title)
-    plt.tight_layout()
+
+    table = table_ax.table(
+        cellText=table_text,
+        colLabels=col_labels,
+        cellLoc="center",
+        colLoc="center",
+        loc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(13)
+    table.scale(1.0, 1.65)
+
+    # Color-code cells for quick comparison: green=correct, red=wrong.
+    for r in range(1, len(table_text) + 1):
+        method_name = "GT" if r == 1 else methods[r - 2]
+        for c in range(1, n + 1):
+            cell = table[(r, c)]
+            if method_name == "GT":
+                cell.set_facecolor("#f0f0f0")
+                continue
+            pred_idx = int(preds_by_method[method_name][c - 1])
+            gt_idx = int(labels[c - 1])
+            cell.set_facecolor("#d9f2d9" if pred_idx == gt_idx else "#f7d6d6")
+
+    # Emphasize header and method-name column.
+    for c in range(0, n + 1):
+        table[(0, c)].set_facecolor("#e6e6e6")
+    for r in range(1, len(table_text) + 1):
+        table[(r, 0)].set_facecolor("#efefef")
+
+    fig.suptitle(title, y=0.97)
+    fig.tight_layout(rect=[0, 0.02, 1, 0.94])
     if save_path:
         plt.savefig(save_path, dpi=100)
         print(f"  Saved → {save_path}")
@@ -289,6 +455,7 @@ def main(args):
     src_ds  = load_split(exp["source"], transform)
     tgt_ds  = load_split(exp["target"], transform)
     test_ds = load_split(exp["test"], transform)
+    class_names = get_class_names(test_ds)
 
     bs = t1["batch_size"]
     src_loader  = DataLoader(src_ds,  batch_size=bs, shuffle=True,  num_workers=4, pin_memory=True)
@@ -304,12 +471,9 @@ def main(args):
     model_src = get_model(t1["model"], num_classes).to(device)
     train_source_only(model_src, src_loader, device, epochs=t1["epochs"])
 
-    results = {"Source Only": evaluate_metrics(model_src, test_loader, device)}
-    visualize_results(
-        model_src, test_loader, device,
-        f"Source-Only – {args.experiment}",
-        save_path=out_dir / "task1_source_only.png",
-    )
+    src_preds, all_labels = collect_predictions(model_src, test_loader, device)
+    method_preds = {"Source Only": src_preds}
+    results = {"Source Only": get_metrics(src_preds, all_labels)}
 
     # ------------------------------------------------------------------
     # Step 2 – Pseudo-label adaptation (Vanilla / CBST / CRST)
@@ -333,12 +497,25 @@ def main(args):
             epochs=t1["adapt_epochs"],
             batch_size=bs,
         )
-        results[mode.upper()] = evaluate_metrics(adapted, test_loader, device)
-        visualize_results(
-            adapted, test_loader, device,
-            f"Post-{mode.upper()} – {args.experiment}",
-            save_path=out_dir / f"task1_{mode}.png",
-        )
+        preds, labels = collect_predictions(adapted, test_loader, device)
+        method_name = "Vanilla" if mode == "vanilla" else mode.upper()
+        results[method_name] = get_metrics(preds, labels)
+        method_preds[method_name] = preds
+
+    acc_scores = {name: metrics["Acc."] for name, metrics in results.items()}
+    top_method = get_top_method_name(results)
+    sample_idx = select_informative_indices(method_preds, all_labels, acc_scores, top_method, n_samples=8)
+    sample_images = get_images_by_indices(test_ds, sample_idx)
+    sample_labels = all_labels[sample_idx]
+    sample_preds = {k: v[sample_idx] for k, v in method_preds.items()}
+    visualize_method_comparison(
+        sample_images,
+        sample_labels,
+        sample_preds,
+        class_names,
+        "Task 1 Method Comparison",
+        save_path=out_dir / "task1_method_comparison.png",
+    )
 
     print_results_table(results, f"Task 1 Results – {args.experiment}")
 

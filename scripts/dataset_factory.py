@@ -20,6 +20,7 @@ Transforms available
 
 from pathlib import Path
 
+import numpy as np
 from torchvision import datasets, transforms
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -127,3 +128,18 @@ def load_split(split_cfg: dict, transform):
 
     raise ValueError(f"Unknown dataset '{name}'. "
                      "Supported: mnist, svhn, usps, office31, officehome, pacs")
+
+
+def get_class_names(dataset) -> list:
+    """Return class names for a dataset, handling Subset and torchvision datasets."""
+    if hasattr(dataset, "dataset"):
+        return get_class_names(dataset.dataset)
+
+    if hasattr(dataset, "classes"):
+        return [str(c) for c in dataset.classes]
+
+    if hasattr(dataset, "targets"):
+        targets = np.array(dataset.targets)
+        return [str(c) for c in np.unique(targets).tolist()]
+
+    raise ValueError("Dataset does not expose class information (.classes or .targets).")
