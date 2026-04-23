@@ -114,7 +114,7 @@ experiments:
       domain: "Real World"
     task1:
       model: resnet18
-      epochs: 10
+      epochs: 30
       adapt_epochs: 5
       batch_size: 32
       pseudo_threshold: 0.85
