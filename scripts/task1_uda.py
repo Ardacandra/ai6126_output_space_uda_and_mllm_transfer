@@ -69,6 +69,37 @@ def load_config(config_path: Path, experiment: str) -> dict:
     return exp
 
 
+def format_comparison_title(exp: dict) -> str:
+    dataset_name = {
+        "mnist": "MNIST",
+        "usps": "USPS",
+        "svhn": "SVHN",
+        "office31": "Office31",
+        "officehome": "OfficeHome",
+        "pacs": "PACS",
+    }
+
+    def fmt_dataset(name: str) -> str:
+        return dataset_name.get(str(name).lower(), str(name))
+
+    def fmt_domain(domain: str) -> str:
+        return str(domain).replace(" ", "-")
+
+    src = exp["source"]
+    tgt = exp["target"]
+    src_ds = fmt_dataset(src["dataset"])
+    tgt_ds = fmt_dataset(tgt["dataset"])
+    src_domain = src.get("domain")
+    tgt_domain = tgt.get("domain")
+
+    if src["dataset"] == tgt["dataset"] and src_domain and tgt_domain:
+        return f"{src_ds} ({fmt_domain(src_domain)} -> {fmt_domain(tgt_domain)})"
+
+    left = f"{src_ds} ({fmt_domain(src_domain)})" if src_domain else src_ds
+    right = f"{tgt_ds} ({fmt_domain(tgt_domain)})" if tgt_domain else tgt_ds
+    return f"{left} -> {right}"
+
+
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
@@ -229,8 +260,9 @@ def select_informative_indices(
     labels: np.ndarray,
     method_scores: dict,
     top_method: str,
-    n_samples: int = 8,
+    n_samples: int = 6,
 ) -> np.ndarray:
+    rng = np.random.default_rng()
     methods = list(preds_by_method.keys())
     if not methods:
         return np.array([], dtype=int)
@@ -265,11 +297,11 @@ def select_informative_indices(
     selected = []
 
     # Force at least one sample where only the top method is correct (if available).
-    for idx in rank(exclusive_top_mask):
+    for idx in rng.permutation(rank(exclusive_top_mask)):
         selected.append(int(idx))
         break
 
-    for idx in rank(primary_mask):
+    for idx in rng.permutation(rank(primary_mask)):
         if idx not in selected:
             selected.append(int(idx))
         if len(selected) >= n_samples:
@@ -277,7 +309,7 @@ def select_informative_indices(
 
     if len(selected) < n_samples and other_idx:
         secondary_mask = top_correct & (~np.all(correct[other_idx], axis=0))
-        for idx in rank(secondary_mask):
+        for idx in rng.permutation(rank(secondary_mask)):
             if idx not in selected:
                 selected.append(int(idx))
             if len(selected) >= n_samples:
@@ -285,14 +317,14 @@ def select_informative_indices(
 
     if len(selected) < n_samples:
         fallback_mask = (num_correct > 0) & (num_correct < len(methods))
-        for idx in rank(fallback_mask):
+        for idx in rng.permutation(rank(fallback_mask)):
             if idx not in selected:
                 selected.append(int(idx))
             if len(selected) >= n_samples:
                 break
 
     if len(selected) < n_samples:
-        for idx in range(pred_mat.shape[1]):
+        for idx in rng.permutation(pred_mat.shape[1]):
             if idx not in selected:
                 selected.append(idx)
             if len(selected) >= n_samples:
@@ -329,7 +361,7 @@ def visualize_method_comparison(
     title: str,
     save_path=None,
 ):
-    n = min(8, len(images))
+    n = min(6, len(images))
     fig = plt.figure(figsize=(3.2 * n, 7.2))
     gs = fig.add_gridspec(2, n, height_ratios=[3.8, 2.4])
     axes = [fig.add_subplot(gs[0, i]) for i in range(n)]
@@ -504,7 +536,7 @@ def main(args):
 
     acc_scores = {name: metrics["Acc."] for name, metrics in results.items()}
     top_method = get_top_method_name(results)
-    sample_idx = select_informative_indices(method_preds, all_labels, acc_scores, top_method, n_samples=8)
+    sample_idx = select_informative_indices(method_preds, all_labels, acc_scores, top_method, n_samples=6)
     sample_images = get_images_by_indices(test_ds, sample_idx)
     sample_labels = all_labels[sample_idx]
     sample_preds = {k: v[sample_idx] for k, v in method_preds.items()}
@@ -513,7 +545,7 @@ def main(args):
         sample_labels,
         sample_preds,
         class_names,
-        "Task 1 Method Comparison",
+        format_comparison_title(exp),
         save_path=out_dir / "task1_method_comparison.png",
     )
 

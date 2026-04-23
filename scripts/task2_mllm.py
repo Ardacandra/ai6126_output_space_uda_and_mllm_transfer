@@ -68,6 +68,37 @@ def load_config(config_path: Path, experiment: str) -> dict:
     return exp
 
 
+def format_comparison_title(exp: dict) -> str:
+    dataset_name = {
+        "mnist": "MNIST",
+        "usps": "USPS",
+        "svhn": "SVHN",
+        "office31": "Office31",
+        "officehome": "OfficeHome",
+        "pacs": "PACS",
+    }
+
+    def fmt_dataset(name: str) -> str:
+        return dataset_name.get(str(name).lower(), str(name))
+
+    def fmt_domain(domain: str) -> str:
+        return str(domain).replace(" ", "-")
+
+    src = exp["source"]
+    tgt = exp["target"]
+    src_ds = fmt_dataset(src["dataset"])
+    tgt_ds = fmt_dataset(tgt["dataset"])
+    src_domain = src.get("domain")
+    tgt_domain = tgt.get("domain")
+
+    if src["dataset"] == tgt["dataset"] and src_domain and tgt_domain:
+        return f"{src_ds} ({fmt_domain(src_domain)} -> {fmt_domain(tgt_domain)})"
+
+    left = f"{src_ds} ({fmt_domain(src_domain)})" if src_domain else src_ds
+    right = f"{tgt_ds} ({fmt_domain(tgt_domain)})" if tgt_domain else tgt_ds
+    return f"{left} -> {right}"
+
+
 # ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
@@ -155,9 +186,10 @@ def select_informative_indices(
     preds_by_method: dict,
     labels: np.ndarray,
     method_scores: dict,
-    n_samples: int = 8,
+    n_samples: int = 6,
     better_quota: int = 5,
 ) -> np.ndarray:
+    rng = np.random.default_rng()
     methods = list(preds_by_method.keys())
     if not methods:
         return np.array([], dtype=int)
@@ -181,8 +213,8 @@ def select_informative_indices(
     worse_only_mask = correct[worse_idx] & (~correct[better_idx])
 
     # For Task 2 we have two methods, so disagreement-only masks are enough.
-    better_candidates = np.where(better_only_mask)[0].tolist()
-    worse_candidates = np.where(worse_only_mask)[0].tolist()
+    better_candidates = rng.permutation(np.where(better_only_mask)[0]).tolist()
+    worse_candidates = rng.permutation(np.where(worse_only_mask)[0]).tolist()
 
     worse_quota = max(0, n_samples - better_quota)
     take_better = min(better_quota, len(better_candidates))
@@ -200,7 +232,7 @@ def select_informative_indices(
 
     # Final fallback to ensure we always return n_samples indices.
     if len(selected) < n_samples:
-        for idx in range(pred_mat.shape[1]):
+        for idx in rng.permutation(pred_mat.shape[1]):
             if idx not in selected:
                 selected.append(idx)
             if len(selected) >= n_samples:
@@ -222,7 +254,7 @@ def visualize_method_comparison(
     class_names: list,
     save_path=None,
 ):
-    n = min(8, len(images))
+    n = min(6, len(images))
     fig = plt.figure(figsize=(3.2 * n, 7.0))
     gs = fig.add_gridspec(2, n, height_ratios=[3.8, 2.3])
     axes = [fig.add_subplot(gs[0, i]) for i in range(n)]
@@ -412,7 +444,7 @@ def main(args):
         "Tip-Adapter":  get_metrics(t_preds, all_labels),
     }
     acc_scores = {name: metrics["Acc."] for name, metrics in results.items()}
-    sample_idx = select_informative_indices(method_preds, all_labels, acc_scores, n_samples=8, better_quota=5)
+    sample_idx = select_informative_indices(method_preds, all_labels, acc_scores, n_samples=6, better_quota=4)
     sample_images = get_images_by_indices(test_ds, sample_idx)
     sample_labels = all_labels[sample_idx]
     sample_preds = {k: v[sample_idx] for k, v in method_preds.items()}
@@ -420,7 +452,7 @@ def main(args):
         sample_images,
         sample_labels,
         sample_preds,
-        "Task 2 Method Comparison",
+        format_comparison_title(exp),
         class_names,
         save_path=out_dir / "task2_method_comparison.png",
     )
